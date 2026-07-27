@@ -1,0 +1,63 @@
+name: upstream-sync
+
+# Pull Impostor/Impostor into this fork daily. A successful fast-forward pushes
+# to master, which triggers clazau-ghcr and republishes the image.
+#
+# Fast-forward ONLY, deliberately. A merge commit here would mean this fork had
+# diverged, and silently auto-merging upstream into local changes on a
+# game server is how you ship a conflict resolution nobody reviewed. If it
+# cannot fast-forward, the run fails loudly and a human rebases.
+
+on:
+  schedule:
+    # 04:00 UTC — off-peak for the game servers this feeds.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          # Full history: a shallow clone cannot be compared against upstream.
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/Impostor/Impostor.git
+          git fetch upstream master
+
+      - name: Report divergence
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          AHEAD=$(git rev-list --count upstream/master..HEAD)
+          echo "behind=$BEHIND ahead=$AHEAD"
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "ahead=$AHEAD"   >> "$GITHUB_OUTPUT"
+
+      - name: Up to date
+        if: steps.check.outputs.behind == '0'
+        run: echo "Nothing to pull." >> $GITHUB_STEP_SUMMARY
+
+      - name: Fast-forward and push
+        if: steps.check.outputs.behind != '0' && steps.check.outputs.ahead == '0'
+        run: |
+          git merge --ff-only upstream/master
+          git push origin master
+          echo "Fast-forwarded ${{ steps.check.outputs.behind }} commit(s) from upstream." >> $GITHUB_STEP_SUMMARY
+
+      - name: Refuse to auto-merge a diverged fork
+        if: steps.check.outputs.behind != '0' && steps.check.outputs.ahead != '0'
+        run: |
+          echo "::error::Fork has diverged (${{ steps.check.outputs.ahead }} local commit(s), ${{ steps.check.outputs.behind }} upstream). Rebase by hand — refusing to auto-merge."
+          exit 1
